@@ -17,6 +17,10 @@
  */
 package org.wso2.carbon.identity.application.authenticator.basicauth;
 
+import org.apache.axis2.AxisFault;
+import org.apache.axis2.context.ConfigurationContext;
+import org.apache.axis2.context.ConfigurationContextFactory;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.identity.application.authentication.framework.AbstractApplicationAuthenticator;
@@ -29,6 +33,7 @@ import org.wso2.carbon.identity.application.authentication.framework.exception.I
 import org.wso2.carbon.identity.application.authentication.framework.exception.LogoutFailedException;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatedUser;
 import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkUtils;
+import org.wso2.carbon.identity.application.authenticator.basicauth.exception.InvalidGeoLocationException;
 import org.wso2.carbon.identity.application.authenticator.basicauth.internal.BasicAuthenticatorServiceComponent;
 import org.wso2.carbon.identity.application.common.model.User;
 import org.wso2.carbon.identity.base.IdentityRuntimeException;
@@ -36,10 +41,23 @@ import org.wso2.carbon.identity.core.model.IdentityErrorMsgContext;
 import org.wso2.carbon.identity.core.util.IdentityCoreConstants;
 import org.wso2.carbon.identity.core.util.IdentityTenantUtil;
 import org.wso2.carbon.identity.core.util.IdentityUtil;
-import org.wso2.carbon.user.api.UserRealm;
+import org.wso2.carbon.identity.mgt.IdentityMgtConfigException;
+import org.wso2.carbon.identity.mgt.IdentityMgtServiceException;
+import org.wso2.carbon.identity.mgt.NotificationSender;
+import org.wso2.carbon.identity.mgt.NotificationSendingModule;
+import org.wso2.carbon.identity.mgt.config.Config;
+import org.wso2.carbon.identity.mgt.config.ConfigBuilder;
+import org.wso2.carbon.identity.mgt.config.ConfigType;
+import org.wso2.carbon.identity.mgt.config.StorageType;
+import org.wso2.carbon.identity.mgt.dto.NotificationDataDTO;
+import org.wso2.carbon.identity.mgt.mail.DefaultEmailSendingModule;
+import org.wso2.carbon.identity.mgt.mail.Notification;
+import org.wso2.carbon.identity.mgt.mail.NotificationBuilder;
+import org.wso2.carbon.identity.mgt.mail.NotificationData;
 import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
+import org.wso2.carbon.user.core.service.RealmService;
 import org.wso2.carbon.user.core.util.UserCoreUtil;
 import org.wso2.carbon.utils.multitenancy.MultitenantUtils;
 
@@ -115,6 +133,13 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
                     (Boolean) context.getProperty("UserTenantDomainMismatch")) {
                 retryParam = "&authFailure=true&authFailureMsg=user.tenant.domain.mismatch.message";
                 context.setProperty("UserTenantDomainMismatch", false);
+            }
+
+            //To prompt the invalid geo location error message in the UI
+            if (context.getProperty("UserGeoLocationInvalid") != null &&
+                    (Boolean) context.getProperty("UserGeoLocationInvalid")) {
+                retryParam = "&authFailure=true&authFailureMsg=geolocation.fail.message";
+                context.setProperty("UserGeoLocationInvalid", false);
             }
 
             IdentityErrorMsgContext errorContext = IdentityUtil.getIdentityErrorMsg();
@@ -245,6 +270,22 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
         }
     }
 
+    /**
+     * Get the user realm of the logged in user
+     */
+    private org.wso2.carbon.user.core.UserRealm getUserRealm(String username) throws AuthenticationFailedException {
+        org.wso2.carbon.user.core.UserRealm userRealm;
+        try {
+            String tenantDomain = MultitenantUtils.getTenantDomain(username);
+            int tenantId = IdentityTenantUtil.getTenantId(tenantDomain);
+
+            RealmService realmService = IdentityTenantUtil.getRealmService();
+            userRealm = (org.wso2.carbon.user.core.UserRealm) realmService.getTenantUserRealm(tenantId);
+        } catch (Exception e) {
+            throw new AuthenticationFailedException("Cannot find the user realm", e);
+        }
+        return userRealm;
+    }
 
     @Override
     protected void processAuthenticationResponse(HttpServletRequest request,
@@ -253,6 +294,54 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
 
         String username = request.getParameter(BasicAuthenticatorConstants.USER_NAME);
         String password = request.getParameter(BasicAuthenticatorConstants.PASSWORD);
+        String tenantAwareUsername = null;
+
+        boolean isValidGeoLocation;
+
+        String ipAddress = IdentityUtil.getClientIpAddress(request);
+
+        //String ipAddress = "143.107.0.0";
+
+        LocationFinder locationFinder = new LocationFinder();
+        String country = locationFinder.getCountryFromIpAddress(ipAddress);
+
+        //TODO: have a set of countries in a config file and get it to a list and validate with that
+        isValidGeoLocation = country.equals(BasicAuthenticatorConstants.AUTHORIZED_COUNTRY);
+
+        String email = null;
+        if (StringUtils.isNotEmpty(username)) {
+            org.wso2.carbon.user.core.UserRealm userRealm = getUserRealm(username);
+            tenantAwareUsername = MultitenantUtils.getTenantAwareUsername(String.valueOf(username));
+            if (userRealm != null) {
+
+                try {
+                    email = userRealm.getUserStoreManager()
+                            .getUserClaimValue(tenantAwareUsername, BasicAuthenticatorConstants.EMAIL_CLAIM, null);
+                } catch (UserStoreException e) {
+                    e.printStackTrace();
+                }
+
+                if (StringUtils.isEmpty(email)) {
+                    log.error("Receiver's email ID can not be null.");
+                    throw new AuthenticationFailedException("Receiver's email ID can not be null.");
+                } else {
+                    context.setProperty(BasicAuthenticatorConstants.RECEIVER_EMAIL, email);
+                }
+
+            }
+        }
+
+        if (!isValidGeoLocation) {
+            context.setProperty("UserGeoLocationInvalid", true);
+
+            sendGeoAlert(username, email);
+
+            if (log.isDebugEnabled()) {
+                log.debug("User authentication failed due to unauthorized geo location");
+            }
+            throw new InvalidGeoLocationException("User authentication failed due to unauthorized geo location",
+                    User.getUserFromUserName(username));
+        }
 
         Map<String, Object> authProperties = context.getProperties();
         if (authProperties == null) {
@@ -267,7 +356,7 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
         // Check the authentication
         try {
             int tenantId = IdentityTenantUtil.getTenantIdOfUser(username);
-            UserRealm userRealm = BasicAuthenticatorServiceComponent.getRealmService().getTenantUserRealm(tenantId);
+            org.wso2.carbon.user.api.UserRealm userRealm = BasicAuthenticatorServiceComponent.getRealmService().getTenantUserRealm(tenantId);
             if (userRealm != null) {
                 userStoreManager = (UserStoreManager) userRealm.getUserStoreManager();
                 isAuthenticated = userStoreManager.authenticate(MultitenantUtils.getTenantAwareUsername(username), password);
@@ -299,7 +388,6 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
             throw new InvalidCredentialsException("User authentication failed due to invalid credentials",
                     User.getUserFromUserName(username));
         }
-
 
         String tenantDomain = MultitenantUtils.getTenantDomain(username);
 
@@ -355,6 +443,57 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
 
         if (rememberMe != null && "on".equals(rememberMe)) {
             context.setRememberMe(true);
+        }
+    }
+
+    private void sendGeoAlert(String username, String email) throws AuthenticationFailedException {
+        System.setProperty(BasicAuthenticatorConstants.AXIS2, BasicAuthenticatorConstants.AXIS2_FILE);
+        try {
+            ConfigurationContext configurationContext =
+                    ConfigurationContextFactory.createConfigurationContextFromFileSystem((String) null, (String) null);
+            if (configurationContext.getAxisConfiguration().getTransportsOut()
+                    .containsKey(BasicAuthenticatorConstants.TRANSPORT_MAILTO)) {
+                NotificationSender notificationSender = new NotificationSender();
+                NotificationDataDTO notificationData = new NotificationDataDTO();
+                Notification emailNotification = null;
+                NotificationData emailNotificationData = new NotificationData();
+                ConfigBuilder configBuilder = ConfigBuilder.getInstance();
+                String tenantDomain = MultitenantUtils.getTenantDomain(username);
+                int tenantId = IdentityTenantUtil.getTenantId(tenantDomain);
+                String emailTemplate;
+                Config config;
+                try {
+                    config = configBuilder.loadConfiguration(ConfigType.EMAIL, StorageType.REGISTRY, tenantId);
+                } catch (IdentityMgtConfigException e) {
+                    log.error("Error occurred while loading email templates for user : " + username, e);
+                    throw new AuthenticationFailedException("Error occurred while loading email templates for user : "
+                            + username, e);
+                }
+                emailNotificationData.setSendTo(email);
+                if (config.getProperties().containsKey(BasicAuthenticatorConstants.GEO_ALERT_EMAIL_TEMPLATE)) {
+                    emailTemplate = config.getProperty(BasicAuthenticatorConstants.GEO_ALERT_EMAIL_TEMPLATE);
+                    try {
+                        emailNotification = NotificationBuilder.createNotification("EMAIL", emailTemplate,
+                                emailNotificationData);
+                    } catch (IdentityMgtServiceException e) {
+                        log.error("Error occurred while creating notification from email template : " + emailTemplate, e);
+                        throw new AuthenticationFailedException("Error occurred while creating notification from email template : "
+                                + emailTemplate, e);
+                    }
+                    notificationData.setNotificationAddress(email);
+                    NotificationSendingModule module = new DefaultEmailSendingModule();
+                    module.setNotificationData(notificationData);
+                    module.setNotification(emailNotification);
+                    notificationSender.sendNotification(module);
+                    notificationData.setNotificationSent(true);
+                } else {
+                    throw new AuthenticationFailedException("Unable find the email template");
+                }
+            } else {
+                throw new AuthenticationFailedException("MAILTO transport sender is not defined in axis2 configuration file");
+            }
+        } catch (AxisFault axisFault) {
+            throw new AuthenticationFailedException("Error while getting the SMTP configuration");
         }
     }
 

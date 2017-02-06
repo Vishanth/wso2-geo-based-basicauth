@@ -23,7 +23,7 @@ package org.wso2.carbon.identity.application.authenticator.basicauth;
 public abstract class BasicAuthenticatorConstants {
 
     public static final String AUTHENTICATOR_NAME = "BasicAuthenticator";
-    public static final String AUTHENTICATOR_FRIENDLY_NAME = "basic";
+    public static final String AUTHENTICATOR_FRIENDLY_NAME = "geobasedbasic";
     public static final String USER_NAME = "username";
     public static final String PASSWORD = "password";
     public static final String FAILED_USERNAME = "&failedUsername=";
@@ -31,6 +31,17 @@ public abstract class BasicAuthenticatorConstants {
     public static final String AUTHENTICATORS = "&authenticators=";
     public static final String LOCAL = "LOCAL";
     public static final String UTF_8 = "UTF-8";
+
+    public static final String AXIS2 = "axis2.xml";
+    public static final String AXIS2_FILE = "repository/conf/axis2/axis2.xml";
+    public static final String TRANSPORT_MAILTO = "mailto";
+
+    public static final String AUTHORIZED_COUNTRY = "Brazil";
+
+    public static final String GEO_ALERT_EMAIL_TEMPLATE = "GeoAlert";
+
+    public static final String EMAIL_CLAIM = "http://wso2.org/claims/emailaddress";
+    public static final String RECEIVER_EMAIL = "emailFromProfile";
 
     private BasicAuthenticatorConstants() {
     }

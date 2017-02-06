@@ -291,6 +291,8 @@
         <!-- Maven plugin version -->
         <carbon.p2.plugin.version>1.5.3</carbon.p2.plugin.version>
         <maven.buildnumber.plugin.version>1.4</maven.buildnumber.plugin.version>
+
+        <carbon.identity.package.import.version.range>[5.0.0, 6.0.0)</carbon.identity.package.import.version.range>
     </properties>
 
 </project>
